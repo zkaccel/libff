@@ -16,14 +16,22 @@
 
 #include <algorithm>
 #include <cassert>
+#include <inaccel/coral>
 #include <type_traits>
 
+#include <libff/algebra/curves/alt_bn128/alt_bn128_g1.hpp>
+#include <libff/algebra/curves/alt_bn128/alt_bn128_g2.hpp>
 #include <libff/algebra/fields/bigint.hpp>
 #include <libff/algebra/fields/fp_aux.tcc>
 #include <libff/algebra/scalar_multiplication/multiexp.hpp>
 #include <libff/algebra/scalar_multiplication/wnaf.hpp>
 #include <libff/common/profiling.hpp>
 #include <libff/common/utils.hpp>
+
+namespace Bn128 {
+    static void init();
+}
+#include "bn128.hpp"
 
 namespace libff {
 
@@ -397,6 +405,172 @@ T multi_exp_inner(
     }
 
     return opt_result;
+}
+
+template<typename T, typename FieldT, multi_exp_method Method,
+    typename std::enable_if<(Method == multi_exp_method_inaccel), int>::type = 0>
+alt_bn128_G1 multi_exp_inner(
+    std::vector<alt_bn128_G1>::const_iterator vec_start,
+    std::vector<alt_bn128_G1>::const_iterator vec_end,
+    std::vector<alt_bn128_Fr>::const_iterator scalar_start,
+    std::vector<alt_bn128_Fr>::const_iterator scalar_end)
+{
+    size_t length = vec_end - vec_start;
+
+    inaccel::vector<uint8_t> vec_buf(length * 64);
+    inaccel::vector<uint8_t> scalar_buf(length * 32);
+    inaccel::vector<uint8_t> result_buf(96);
+
+    Bn128::init();
+
+    std::vector<alt_bn128_G1>::const_iterator vec_it;
+    std::vector<alt_bn128_Fr>::const_iterator scalar_it;
+
+    size_t i = 0;
+    for (vec_it = vec_start, scalar_it = scalar_start; vec_it != vec_end; ++vec_it, ++scalar_it)
+    {
+        if ((*vec_it).is_zero()) {
+            continue;
+        }
+
+        if ((*scalar_it).is_zero()) {
+            continue;
+        }
+
+        alt_bn128_G1 vec = *vec_it;
+        if (!vec.is_special()) {
+            vec.to_special();
+        }
+
+        mpz_t vec_X_mpz, vec_Y_mpz;
+        mpz_inits(vec_X_mpz, vec_Y_mpz, NULL);
+        vec.X.as_bigint().to_mpz(vec_X_mpz);
+        vec.Y.as_bigint().to_mpz(vec_Y_mpz);
+
+        Bn128::af_p_t<Bn128::f_t<1>> tmp;
+        mpz_set(tmp.x.c[0], vec_X_mpz);
+        mpz_set(tmp.y.c[0], vec_Y_mpz);
+        Bn128::af_export(&vec_buf[i * 64], Bn128::to_mont(tmp));
+
+        mpz_clears(vec_X_mpz, vec_Y_mpz, NULL);
+
+        mpz_t scalar_mpz;
+        mpz_init(scalar_mpz);
+        (*scalar_it).as_bigint().to_mpz(scalar_mpz);
+
+        Bn128::fe_export(&scalar_buf[i * 32], scalar_mpz);
+
+        mpz_clear(scalar_mpz);
+
+        i++;
+    }
+    assert(scalar_it == scalar_end);
+
+    if (i == 0) {
+        return alt_bn128_G1::zero();
+    }
+
+    length = ((i - 1) | 7) + 1;
+
+    vec_buf.resize(length * 64);
+    scalar_buf.resize(length * 32);
+
+    inaccel::request multiexp("libff.multiexp.alt-bn128-g1");
+    multiexp.arg(length).arg(vec_buf).arg(scalar_buf).arg(result_buf);
+    inaccel::submit(multiexp).get();
+
+    Bn128::jb_p_t<Bn128::f_t<1>> result_jacobian;
+    Bn128::jb_import(result_jacobian, result_buf.data());
+    Bn128::af_p_t<Bn128::f_t<1>> result_affine = Bn128::mont_jb_to_af(result_jacobian);
+
+    alt_bn128_G1 result(alt_bn128_Fq(bigint<4>(result_affine.x.c[0])), alt_bn128_Fq(bigint<4>(result_affine.y.c[0])), alt_bn128_Fq::one());
+
+    return result;
+}
+
+template<typename T, typename FieldT, multi_exp_method Method,
+    typename std::enable_if<(Method == multi_exp_method_inaccel), int>::type = 0>
+alt_bn128_G2 multi_exp_inner(
+    std::vector<alt_bn128_G2>::const_iterator vec_start,
+    std::vector<alt_bn128_G2>::const_iterator vec_end,
+    std::vector<alt_bn128_Fr>::const_iterator scalar_start,
+    std::vector<alt_bn128_Fr>::const_iterator scalar_end)
+{
+    size_t length = vec_end - vec_start;
+
+    inaccel::vector<uint8_t> vec_buf(length * 128);
+    inaccel::vector<uint8_t> scalar_buf(length * 32);
+    inaccel::vector<uint8_t> result_buf(192);
+
+    Bn128::init();
+
+    std::vector<alt_bn128_G2>::const_iterator vec_it;
+    std::vector<alt_bn128_Fr>::const_iterator scalar_it;
+
+    size_t i = 0;
+    for (vec_it = vec_start, scalar_it = scalar_start; vec_it != vec_end; ++vec_it, ++scalar_it)
+    {
+        if ((*vec_it).is_zero()) {
+            continue;
+        }
+
+        if ((*scalar_it).is_zero()) {
+            continue;
+        }
+
+        alt_bn128_G2 vec = *vec_it;
+        if (!vec.is_special()) {
+            vec.to_special();
+        }
+
+        mpz_t vec_X_c0_mpz, vec_X_c1_mpz, vec_Y_c0_mpz, vec_Y_c1_mpz;
+        mpz_inits(vec_X_c0_mpz, vec_X_c1_mpz, vec_Y_c0_mpz, vec_Y_c1_mpz, NULL);
+        vec.X.c0.as_bigint().to_mpz(vec_X_c0_mpz);
+        vec.X.c1.as_bigint().to_mpz(vec_X_c1_mpz);
+        vec.Y.c0.as_bigint().to_mpz(vec_Y_c0_mpz);
+        vec.Y.c1.as_bigint().to_mpz(vec_Y_c1_mpz);
+
+        Bn128::af_p_t<Bn128::f_t<2>> vec_affine;
+        mpz_set(vec_affine.x.c[0], vec_X_c0_mpz);
+        mpz_set(vec_affine.x.c[1], vec_X_c1_mpz);
+        mpz_set(vec_affine.y.c[0], vec_Y_c0_mpz);
+        mpz_set(vec_affine.y.c[1], vec_Y_c1_mpz);
+        Bn128::af_export(&vec_buf[i * 128], Bn128::to_mont(vec_affine));
+
+        mpz_clears(vec_X_c0_mpz, vec_X_c1_mpz, vec_Y_c0_mpz, vec_Y_c1_mpz, NULL);
+
+        mpz_t scalar_mpz;
+        mpz_init(scalar_mpz);
+        (*scalar_it).as_bigint().to_mpz(scalar_mpz);
+
+        Bn128::fe_export(&scalar_buf[i * 32], scalar_mpz);
+
+        mpz_clear(scalar_mpz);
+
+        i++;
+    }
+    assert(scalar_it == scalar_end);
+
+    if (i == 0) {
+        return alt_bn128_G2::zero();
+    }
+
+    length = ((i - 1) | 7) + 1;
+
+    vec_buf.resize(length * 128);
+    scalar_buf.resize(length * 32);
+
+    inaccel::request multiexp("libff.multiexp.alt-bn128-g2");
+    multiexp.arg(length).arg(vec_buf).arg(scalar_buf).arg(result_buf);
+    inaccel::submit(multiexp).get();
+
+    Bn128::jb_p_t<Bn128::f_t<2>> result_jacobian;
+    Bn128::jb_import(result_jacobian, result_buf.data());
+    Bn128::af_p_t<Bn128::f_t<2>> result_affine = Bn128::mont_jb_to_af(result_jacobian);
+
+    alt_bn128_G2 result(alt_bn128_Fq2(bigint<4>(result_affine.x.c[0]), bigint<4>(result_affine.x.c[1])), alt_bn128_Fq2(bigint<4>(result_affine.y.c[0]), bigint<4>(result_affine.y.c[1])), alt_bn128_Fq2::one());
+
+    return result;
 }
 
 template<typename T, typename FieldT, multi_exp_method Method>

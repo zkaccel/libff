@@ -43,7 +43,8 @@ enum multi_exp_method {
   * Requires that T implements .dbl() (and, if USE_MIXED_ADDITION is defined,
   * .to_special(), .mixed_add(), and batch_to_special()).
   */
- multi_exp_method_BDLO12
+ multi_exp_method_BDLO12,
+ multi_exp_method_inaccel
 };
 
 /**
